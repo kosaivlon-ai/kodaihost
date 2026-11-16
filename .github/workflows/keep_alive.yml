@@ -1,0 +1,25 @@
+name: Auto 24/7 Bot Host
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
+jobs:
+  run-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install fastapi uvicorn python-multipart pydantic psutil
+      - name: Run Bot Host Server
+        env:
+          API_TOKEN: ${{ secrets.API_TOKEN }}
+          ADMIN_BOT_TOKEN: ${{ secrets.ADMIN_BOT_TOKEN }}
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
+        run: python server.py
+        
