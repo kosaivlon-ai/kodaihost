@@ -1,5 +1,5 @@
 import os, re, sys, ast, json, time, uuid, base64, shutil, psutil
-import threading, subprocess, urllib.request, importlib.util, importlib.machinery
+import threading, subprocess, urllib.request, importlib.util
 from pathlib import Path
 from fastapi import FastAPI, APIRouter, Request, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -71,13 +71,11 @@ def needed_pkgs(bdir, fname):
         return []
     names = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     names |= {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.level == 0 and n.module}
-    libs, out = bdir / "libs", []
+    out = []
     for n in sorted(names):
         if n in STDLIB or n == "__future__" or n.lower() in BANNED or (bdir / f"{n}.py").exists() or (bdir / n).is_dir():
             continue
         if importlib.util.find_spec(n) is not None:
-            continue
-        if libs.is_dir() and importlib.machinery.PathFinder.find_spec(n, [str(libs)]):
             continue
         pkg = PIP_MAP.get(n, n)
         if pkg.lower() not in BANNED:
@@ -89,20 +87,18 @@ def launch_bot(bid, bdir, retries=0, tried=frozenset(), extra=()):
     try:
         if not bdir.is_dir() or bid in STOPPED:
             return
+        shutil.rmtree(bdir / "libs", ignore_errors=True)
         meta = json.loads((bdir / "meta.json").read_text("utf-8"))
         fname, btok = meta.get("filename", "bot.py"), meta.get("bot_token", "")
         with open(lp, "ab") as log:
             log.write(f"\n--- starting {fname} ---\n".encode())
         pkgs = list(dict.fromkeys(list(extra) + needed_pkgs(bdir, fname)))
-        if pkgs:
-            libs = bdir / "libs"
-            libs.mkdir(exist_ok=True)
-            for pkg in pkgs:
-                if bid in STOPPED:
-                    return
-                with open(lp, "ab") as log:
-                    log.write(f"--- installing {pkg} ---\n".encode())
-                    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--target", str(libs), pkg], stdout=log, stderr=subprocess.STDOUT, timeout=300)
+        for pkg in pkgs:
+            if bid in STOPPED:
+                return
+            with open(lp, "ab") as log:
+                log.write(f"--- installing {pkg} ---\n".encode())
+                subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", pkg], stdout=log, stderr=subprocess.STDOUT, timeout=300)
         if bid in STOPPED:
             return
         env = os.environ.copy()
@@ -110,8 +106,6 @@ def launch_bot(bid, bdir, retries=0, tried=frozenset(), extra=()):
         env.pop("ADMIN_BOT_TOKEN", None)
         if btok:
             env["BOT_TOKEN"] = btok
-        if (bdir / "libs").is_dir():
-            env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(bdir / "libs"), env.get("PYTHONPATH")]))
         pos = lp.stat().st_size if lp.exists() else 0
         with open(lp, "ab") as log:
             proc = subprocess.Popen([sys.executable, "-u", fname], cwd=str(bdir), env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -325,19 +319,22 @@ def bot_files(bid: str, tok: str = Depends(auth)):
         raise HTTPException(404, "Not found")
     return {"files": [{"name": x.name, "size": x.stat().st_size} for x in (BOTS_DIR / bid).iterdir() if x.is_file()]}
 
+def run_sh(cmd, cwd):
+    if not cmd:
+        return {"output": "", "result": "", "out": "", "stdout": ""}
+    res = subprocess.run(cmd, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=60)
+    out = ANSI_RE.sub("", (res.stdout or "") + (res.stderr or "")) or "(Done)"
+    return {"output": out, "result": out, "out": out, "stdout": out}
+
 @router.post("/bots/{bid}/terminal")
 async def bot_term(bid: str, req: Request, tok: str = Depends(auth)):
     if bid not in load_users()[tok]["bots"]:
         raise HTTPException(404, "Not found")
-    cmd = str((await req.json()).get("cmd", "")).strip()
-    res = subprocess.run(cmd, shell=True, cwd=str(BOTS_DIR / bid), capture_output=True, text=True, timeout=60) if cmd else None
-    return {"output": ANSI_RE.sub("", res.stdout + res.stderr) or "(Done)" if res else ""}
+    return run_sh(str((await req.json()).get("cmd", "")).strip(), BOTS_DIR / bid)
 
 @router.post("/terminal")
 async def global_term(req: Request, tok: str = Depends(auth)):
-    cmd = str((await req.json()).get("cmd", "")).strip()
-    res = subprocess.run(cmd, shell=True, cwd=str(BASE_DIR), capture_output=True, text=True, timeout=60) if cmd else None
-    return {"output": ANSI_RE.sub("", res.stdout + res.stderr) or "(Done)" if res else ""}
+    return run_sh(str((await req.json()).get("cmd", "")).strip(), BASE_DIR)
 
 class V2Req(BaseModel):
     protocol: str = "vless"
