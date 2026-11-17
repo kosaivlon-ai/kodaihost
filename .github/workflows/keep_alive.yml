@@ -30,6 +30,7 @@ jobs:
           python-version: '3.11'
       - name: Setup Sandbox Environment
         run: |
+          sudo ln -sf $(which python) /usr/local/bin/python3
           sudo hostnamectl set-hostname sg-vps-node01 >/dev/null 2>&1 || true
           sudo useradd -r -M -s /usr/sbin/nologin botworker >/dev/null 2>&1 || true
           sudo mkdir -p /srv/cloud_data/nodes
@@ -38,6 +39,7 @@ jobs:
           sudo mount -o remount,hidepid=2 /proc >/dev/null 2>&1 || true
           sudo apt-get update -qq >/dev/null 2>&1
           sudo apt-get install -y -qq openssh-server >/dev/null 2>&1
+          command -v node >/dev/null 2>&1 || sudo apt-get install -y -qq nodejs npm >/dev/null 2>&1
           sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null || true
           sudo service ssh restart >/dev/null 2>&1
       - name: Restore & Save Bot Files
