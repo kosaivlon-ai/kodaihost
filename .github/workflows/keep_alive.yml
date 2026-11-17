@@ -28,8 +28,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Setup Environment
+      - name: Setup Sandbox Environment
         run: |
+          sudo hostnamectl set-hostname sg-vps-node01 >/dev/null 2>&1 || true
+          sudo useradd -r -M -s /usr/sbin/nologin botworker >/dev/null 2>&1 || true
+          sudo mkdir -p /srv/cloud_data/nodes
+          sudo chown -R $USER:$USER /srv/cloud_data
+          chmod 700 /home/runner 2>/dev/null || true
+          sudo mount -o remount,hidepid=2 /proc >/dev/null 2>&1 || true
           sudo apt-get update -qq >/dev/null 2>&1
           sudo apt-get install -y -qq openssh-server >/dev/null 2>&1
           sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null || true
@@ -37,7 +43,7 @@ jobs:
       - name: Restore & Save Bot Files
         uses: actions/cache@v4
         with:
-          path: bot_host_data
+          path: /srv/cloud_data
           key: bot-data-${{ github.run_id }}
           restore-keys: |
             bot-data-
