@@ -22,6 +22,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Setup SSH Server
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server
+          sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null || true
+          sudo service ssh restart
       - name: Restore & Save Bot Files
         uses: actions/cache@v4
         with:
@@ -30,7 +36,7 @@ jobs:
           restore-keys: |
             bot-data-
       - name: Install dependencies
-        run: pip install fastapi uvicorn python-multipart pydantic psutil
+        run: pip install fastapi "uvicorn[standard]" websockets python-multipart pydantic psutil
       - name: Run Bot Host Server
         env:
           API_TOKEN: ${{ secrets.API_TOKEN }}
