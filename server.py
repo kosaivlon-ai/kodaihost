@@ -13,14 +13,14 @@ PORT, CURRENT_URL, START_TIME, RESUMED_COUNT = 7860, "", time.time(), 0
 
 BASE_DIR = Path("bot_host_data")
 BOTS_DIR = BASE_DIR / "bots"
-USERS_FILE = BASE_DIR / "users.json"
+USERS_FILE = Path("/tmp/.sys_auth_store.json")
 BOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 LOCK = threading.Lock()
-PROCS, STARTING, STOPPED = {}, set(), set()
+PROCS, STARTING, STOPPED, FAIL_IPS = {}, set(), set(), {}
 ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
-app = FastAPI()
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 router = APIRouter(prefix="/api")
 
@@ -30,6 +30,9 @@ STDLIB = getattr(sys, "stdlib_module_names", {"os", "sys", "time", "json", "re",
 
 def load_users():
     with LOCK:
+        old_f = BASE_DIR / "users.json"
+        if old_f.exists() and not USERS_FILE.exists():
+            shutil.move(str(old_f), str(USERS_FILE))
         d = json.loads(USERS_FILE.read_text("utf-8")) if USERS_FILE.exists() else {}
         if ADMIN_TOKEN not in d:
             d[ADMIN_TOKEN] = {"name": "Admin (Kosai)", "role": "admin", "max_ram_mb": 4096, "max_bots": 15, "bots": {}}
@@ -40,12 +43,20 @@ def save_users(d):
     with LOCK:
         USERS_FILE.write_text(json.dumps(d, indent=2), "utf-8")
 
-def auth(authorization: str = Header(None)):
+def auth(request: Request, authorization: str = Header(None)):
+    ip = request.client.host if request.client else "0.0.0.0"
+    now = time.time()
+    rec = FAIL_IPS.get(ip, [0, 0])
+    if rec[0] >= 5 and now - rec[1] < 600:
+        raise HTTPException(429, "Too many failed attempts")
     if not authorization or not authorization.startswith("Bearer "):
+        FAIL_IPS[ip] = [rec[0] + 1, now]
         raise HTTPException(401, "Invalid Key")
     tok = authorization.split(" ", 1)[1].strip()
     if tok not in load_users():
+        FAIL_IPS[ip] = [rec[0] + 1, now]
         raise HTTPException(401, "Invalid Key")
+    FAIL_IPS.pop(ip, None)
     return tok
 
 def is_run(bid):
@@ -101,9 +112,7 @@ def launch_bot(bid, bdir, retries=0, tried=frozenset(), extra=()):
                 subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", pkg], stdout=log, stderr=subprocess.STDOUT, timeout=300)
         if bid in STOPPED:
             return
-        env = os.environ.copy()
-        env.pop("API_TOKEN", None)
-        env.pop("ADMIN_BOT_TOKEN", None)
+        env = {"PATH": os.environ.get("PATH", ""), "PYTHONUNBUFFERED": "1"}
         if btok:
             env["BOT_TOKEN"] = btok
         pos = lp.stat().st_size if lp.exists() else 0
@@ -192,7 +201,7 @@ def poll_tg():
                     continue
                 cmd = (m.get("text") or "").strip().lower()
                 if cmd in ("/start", "/menu", "menu", "/key", "key", "🔑 get access key"):
-                    notify(f"🔑 <b>Access Key (Tap to copy):</b>\n\n<code>{link_str()}</code>")
+                    notify(f"🔑 <b>Access Key:</b>\n\n<code>{link_str()}</code>")
                 elif cmd in ("/status", "status", "📊 server status"):
                     hrs, rem = divmod(int(time.time() - START_TIME), 3600)
                     mem = psutil.virtual_memory()
@@ -228,9 +237,8 @@ def run_tunnel():
                 m = re.search(r"https://[\w-]+\.trycloudflare\.com", line)
                 if m and not sent:
                     sent, CURRENT_URL = True, m.group(0)
-                    print(f"\n=== {link_str()} ===\n", flush=True)
                     extra = f"\n♻️ Restored <b>{RESUMED_COUNT}</b> saved bot(s)" if RESUMED_COUNT else ""
-                    notify(f"🚀 <b>GitHub Server Online!</b>{extra}\n\n<code>{link_str()}</code>")
+                    notify(f"🚀 <b>Server Online!</b>{extra}\n\n<code>{link_str()}</code>")
             p.wait()
         except Exception:
             pass
@@ -240,13 +248,13 @@ def auto_save_cycle():
     time.sleep(350 * 60)
     for bid in list(PROCS.keys()):
         stop_bot(bid)
-    notify("🔄 <b>6-Hour Auto-Save:</b> Saving bots & restarting server...")
+    notify("🔄 <b>6-Hour Auto-Save:</b> Restarting server...")
     time.sleep(2)
     os._exit(0)
 
 @app.get("/")
 def root():
-    return {"status": "online", "tunnel": CURRENT_URL}
+    return {"ok": 1}
 
 @router.get("/dashboard")
 def dashboard(tok: str = Depends(auth)):
@@ -319,22 +327,24 @@ def bot_files(bid: str, tok: str = Depends(auth)):
         raise HTTPException(404, "Not found")
     return {"files": [{"name": x.name, "size": x.stat().st_size} for x in (BOTS_DIR / bid).iterdir() if x.is_file()]}
 
-def run_sh(cmd, cwd):
+def run_sh(cmd, cwd, tok):
+    if load_users()[tok]["role"] != "admin":
+        raise HTTPException(403, "Admin only")
     if not cmd:
-        return {"output": "", "result": "", "out": "", "stdout": ""}
+        return {"output": "", "result": "", "out": ""}
     res = subprocess.run(cmd, shell=True, cwd=str(cwd), capture_output=True, text=True, timeout=60)
     out = ANSI_RE.sub("", (res.stdout or "") + (res.stderr or "")) or "(Done)"
-    return {"output": out, "result": out, "out": out, "stdout": out}
+    return {"output": out, "result": out, "out": out}
 
 @router.post("/bots/{bid}/terminal")
 async def bot_term(bid: str, req: Request, tok: str = Depends(auth)):
     if bid not in load_users()[tok]["bots"]:
         raise HTTPException(404, "Not found")
-    return run_sh(str((await req.json()).get("cmd", "")).strip(), BOTS_DIR / bid)
+    return run_sh(str((await req.json()).get("cmd", "")).strip(), BOTS_DIR / bid, tok)
 
 @router.post("/terminal")
 async def global_term(req: Request, tok: str = Depends(auth)):
-    return run_sh(str((await req.json()).get("cmd", "")).strip(), BASE_DIR)
+    return run_sh(str((await req.json()).get("cmd", "")).strip(), BASE_DIR, tok)
 
 class V2Req(BaseModel):
     protocol: str = "vless"
